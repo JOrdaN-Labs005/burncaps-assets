@@ -140,7 +140,7 @@ async function main() {
       if (record(state, { at: now, kind: plan.kind, why: result.why, deploy: deployId })) { exit = 1; await tell(WORDS[plan.kind](result.why)); }
     }
   } else if (plan.action === 'rollback') {
-    exit = 1;
+    exit = drillTo ? 0 : 1; // a real undo fails the job, so GitHub emails; a drill should not
     let target = null;
     try { const r = await netlify(`/sites/${siteId}/deploys/${plan.to}`); if (r.ok) target = await r.json(); } catch {}
     if (!target || target.context !== 'production' || target.state !== 'ready') {
