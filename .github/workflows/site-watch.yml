@@ -1,0 +1,32 @@
+name: Site watch
+# Source of truth: tools/watch/ in the private burncaps repo (tools/watch-sync.mjs copies it here).
+on:
+  schedule:
+    - cron: '3,13,23,33,43,53 * * * *'
+  workflow_dispatch:
+    inputs:
+      drill_to:
+        description: 'Drill: a production deploy id to go back to, for real'
+        required: false
+        default: ''
+permissions:
+  contents: write
+concurrency:
+  group: site-watch
+  cancel-in-progress: false
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: node watch/watch.mjs
+        env:
+          NETLIFY_SITE_ID: ${{ vars.NETLIFY_SITE_ID }}
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          GITHUB_TOKEN: ${{ github.token }}
+          DRILL_TO: ${{ inputs.drill_to }}
