@@ -23,8 +23,12 @@ const UNDO_MEMORY_MS = 24 * 3600e3;
 
 // What to do, as a plain function of what was seen.
 export function decide({ result, token, deployId, state, now }) {
-  if (result.ok) return { action: 'ok', newGood: deployId && deployId !== state.good ? deployId : '' };
+  if (result.ok) {
+    if (token && !deployId) return { action: 'alert', kind: 'key-dead' };
+    return { action: 'ok', newGood: deployId && deployId !== state.good ? deployId : '' };
+  }
   if (result.siteDown) return { action: 'alert', kind: 'site-down' };
+  if (result.inconclusive) return { action: 'alert', kind: 'inconclusive' };
   if (!token) return { action: 'alert', kind: 'no-key' };
   if (!deployId) return { action: 'alert', kind: 'no-deploy-id' };
   if (!state.good) return { action: 'alert', kind: 'no-good-version' };
@@ -35,11 +39,11 @@ export function decide({ result, token, deployId, state, now }) {
 }
 
 // Adds an incident; true when Milan should be told (at most once per kind in two hours).
-export function record(state, incident) {
+export function record(state, incident, { always = false } = {}) {
   state.incidents ??= [];
   state.alerted ??= {};
   const last = state.alerted[incident.kind] || 0;
-  const tell = !last || incident.at - last >= REPEAT_MS;
+  const tell = always || !last || incident.at - last >= REPEAT_MS;
   if (tell) {
     state.alerted[incident.kind] = incident.at;
     state.incidents.push({ ...incident, at: new Date(incident.at).toISOString() });
@@ -50,6 +54,9 @@ export function record(state, incident) {
 
 const WORDS = {
   'site-down': (w) => `Burncaps is not answering: ${w}. Going back to an older version would not help, so nothing was changed.`,
+  'key-dead': () => 'Burncaps is working, but Netlify refused the watcher\'s key, so the watcher can no longer undo a bad version. Make a new key.',
+  inconclusive: (w) => `The watcher could not tell whether Burncaps works, so it changed nothing: ${w}`,
+  'bad-target': (w) => `Burncaps is failing and the version the watcher would go back to is not a production version, so it changed nothing: ${w}`,
   'no-key': (w) => `Burncaps is failing and the watcher has no Netlify key, so it could not undo it: ${w}`,
   'no-deploy-id': (w) => `Burncaps is failing and Netlify refused the watcher's key, so it could not undo it: ${w}`,
   'no-good-version': (w) => `Burncaps is failing and the watcher has no earlier good version to go back to: ${w}`,
@@ -86,7 +93,8 @@ async function main() {
   const save = async (now) => {
     const body = { message: `watch ${new Date(now).toISOString()}`, content: Buffer.from(JSON.stringify(state, null, 1)).toString('base64'), branch: BRANCH, ...(sha ? { sha } : {}) };
     const r = await gh('/contents/state.json', { method: 'PUT', body: JSON.stringify(body) });
-    if (!r.ok) console.error(`could not save the state: ${r.status}`);
+    if (r.ok) sha = (await r.json()).content.sha;
+    else console.error(`could not save the state: ${r.status}`);
   };
 
   const liveDeploy = async () => {
@@ -109,29 +117,52 @@ async function main() {
   // the named deploy, to prove the whole path on the real site.
   const drillTo = process.env.DRILL_TO || '';
   const now = Date.now();
+  // Which version was checked: read before and after, so a publish that lands
+  // during the check is neither called good nor undone. The next run judges it.
+  const deployBefore = await liveDeploy();
   let result = await liveCheckRetried(SITE, { tries: 3, gapMs: 30000 });
   const deployId = await liveDeploy();
+  if (deployBefore !== deployId && !drillTo) {
+    console.log(`the live version changed during the check (${deployBefore} to ${deployId}): judging it next run`);
+    process.exit(0);
+  }
   if (drillTo) { result = { ok: false, siteDown: false, why: 'drill: this failure is pretended' }; state.good = drillTo; delete state.lastRollback; }
   const plan = decide({ result, token: !!token, deployId, state, now });
   console.log(JSON.stringify({ result, deployId, good: state.good, plan }));
+  // One odd run is not news: "could not tell" is only worth a word when it lasts half an hour.
+  state.unclear = plan.kind === 'inconclusive' ? (state.unclear || 0) + 1 : 0;
 
   let exit = 0;
   if (plan.action === 'ok') {
     if (plan.newGood) { state.good = plan.newGood; state.goodAt = new Date(now).toISOString(); }
   } else if (plan.action === 'alert') {
-    exit = 1;
-    if (record(state, { at: now, kind: plan.kind, why: result.why, deploy: deployId })) await tell(WORDS[plan.kind](result.why));
+    if (plan.kind !== 'inconclusive' || state.unclear >= 3) {
+      if (record(state, { at: now, kind: plan.kind, why: result.why, deploy: deployId })) { exit = 1; await tell(WORDS[plan.kind](result.why)); }
+    }
   } else if (plan.action === 'rollback') {
     exit = 1;
-    const r = await netlify(`/sites/${siteId}/deploys/${plan.to}/restore`, { method: 'POST' });
-    if (!r.ok) {
-      if (record(state, { at: now, kind: 'no-deploy-id', why: `the undo was refused (${r.status}); ${result.why}`, deploy: deployId })) await tell(WORDS['no-deploy-id'](`the undo was refused (${r.status}); ${result.why}`));
+    let target = null;
+    try { const r = await netlify(`/sites/${siteId}/deploys/${plan.to}`); if (r.ok) target = await r.json(); } catch {}
+    if (!target || target.context !== 'production' || target.state !== 'ready') {
+      const why = `${plan.to} is ${target ? `${target.context}, ${target.state}` : 'unreadable'}; ${result.why}`;
+      if (record(state, { at: now, kind: 'bad-target', why, deploy: deployId })) await tell(WORDS['bad-target'](why));
     } else {
-      state.lastRollback = { from: deployId, to: plan.to, at: now };
-      await new Promise(res => setTimeout(res, 15000));
-      const after = await liveCheckRetried(SITE, { tries: 2, gapMs: 20000 });
-      const incident = { at: now, kind: 'rollback', why: result.why, from: deployId, to: plan.to, fixed: after.ok };
-      if (record(state, incident)) await tell(WORDS.rollback(result.why, incident));
+      let restored = false;
+      try { restored = (await netlify(`/sites/${siteId}/deploys/${plan.to}/restore`, { method: 'POST' })).ok; } catch {}
+      if (!restored) restored = (await liveDeploy()) === plan.to; // Netlify can answer an error while the restore worked
+      if (!restored) {
+        const why = `the undo was refused; ${result.why}`;
+        if (record(state, { at: now, kind: 'no-deploy-id', why, deploy: deployId })) await tell(WORDS['no-deploy-id'](why));
+      } else {
+        // Saved at once: if this job dies now, the next one must know the undo happened.
+        state.lastRollback = { from: deployId, to: plan.to, at: now };
+        await save(now);
+        await new Promise(res => setTimeout(res, 15000));
+        const after = await liveCheckRetried(SITE, { tries: 2, gapMs: 20000 });
+        const incident = { at: now, kind: 'rollback', why: result.why, from: deployId, to: plan.to, fixed: after.ok, ...(drillTo ? { drill: true } : {}) };
+        record(state, incident, { always: true });
+        await tell(WORDS.rollback(result.why, incident));
+      }
     }
   }
 
