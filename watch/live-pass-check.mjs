@@ -27,6 +27,11 @@ const SAMPLE_FILE = '000000000000000000000003'; // netlify/functions/pass.mjs SA
 const MAC_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// Three answers, because the wrong one is expensive: an undo of a good version.
+//   ok            the site works
+//   a failure     it answered, and what it answered is wrong: the version is bad
+//   inconclusive  this check could not tell (no Chrome, a timeout, too many
+//                 requests): never a reason to undo anything
 // siteDown: the site itself does not answer, so going back to an older version
 // would not help (Netlify out of credits, a Netlify outage, no network).
 export async function checkServer(site = SITE) {
@@ -34,21 +39,24 @@ export async function checkServer(site = SITE) {
   let home;
   try { home = await call('/', { method: 'HEAD' }); }
   catch (err) { return { ok: false, siteDown: true, why: `the home page did not answer (${err.message})` }; }
-  if (home.status !== 200) return { ok: false, siteDown: true, why: `the home page answered ${home.status}` };
-  const problems = [];
+  if (home.status >= 500) return { ok: false, siteDown: true, why: `the home page answered ${home.status}` };
+  const problems = [], unknown = [];
+  if (home.status !== 200) problems.push(`the home page answered ${home.status}`);
+  const judge = (label, status) => { if (status === 429) unknown.push(`${label} answered 429`); else problems.push(`${label} answered ${status}`); };
   try {
     const r = await call('/api/activate?health=1');
     const j = r.ok ? await r.json() : null;
     const off = j ? Object.entries(j).filter(([, v]) => v !== true).map(([k]) => k) : [];
-    if (!j) problems.push(`health answered ${r.status}`);
+    if (!j) judge('health', r.status);
     else if (Object.keys(j).length < 4) problems.push('health answered too few settings');
     else if (off.length) problems.push(`health says these are missing: ${off.join(', ')}`);
-  } catch (err) { problems.push(`health did not answer (${err.message})`); }
+  } catch (err) { unknown.push(`health did not answer (${err.message})`); }
   try {
     const r = await call('/api/pass', { method: 'POST' });
-    if (r.status !== 400) problems.push(`/api/pass answered ${r.status} to an empty request (400 expected)`);
-  } catch (err) { problems.push(`/api/pass did not answer (${err.message})`); }
-  return { ok: !problems.length, siteDown: false, why: problems.join('; ') };
+    if (r.status !== 400) judge('/api/pass', r.status);
+  } catch (err) { unknown.push(`/api/pass did not answer (${err.message})`); }
+  const why = [...problems, ...unknown].join('; ');
+  return { ok: !why, siteDown: false, inconclusive: !problems.length && !!unknown.length, why };
 }
 
 export async function checkPage(site = SITE) {
@@ -70,13 +78,13 @@ export async function checkPage(site = SITE) {
       try { port = Number(readFileSync(path.join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0]); } catch {}
       if (!port) await sleep(250);
     }
-    if (!port) return { ok: false, why: 'Chrome did not start' };
+    if (!port) return { ok: false, inconclusive: true, why: 'Chrome did not start' };
     let target;
     for (let i = 0; i < 40 && !target; i++) {
       try { target = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find(t => t.type === 'page'); } catch {}
       if (!target) await sleep(250);
     }
-    if (!target) return { ok: false, why: 'Chrome did not open a page' };
+    if (!target) return { ok: false, inconclusive: true, why: 'Chrome did not open a page' };
     ws = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error('no connection to Chrome')); });
     let id = 0;
@@ -100,21 +108,28 @@ export async function checkPage(site = SITE) {
     })()`;
     const res = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
     const value = res.result?.result?.value;
-    if (!value) return { ok: false, why: `the page could not run the check: ${res.result?.exceptionDetails?.exception?.description || 'no value'}` };
+    if (!value) {
+      const text = String(res.result?.exceptionDetails?.exception?.description || 'no value');
+      return { ok: false, inconclusive: /Failed to fetch|NetworkError|Load failed|no value/i.test(text), why: `the page could not run the check: ${text.slice(0, 300)}` };
+    }
     const o = JSON.parse(value);
     if (o.status === 200 && o.signed && o.allows) return { ok: true, why: '' };
+    // 402 and 403: the plan rules refused the sample (no free plan at that moment), 429: too many requests. Neither says the version is bad.
+    if ([402, 403, 429].includes(o.status)) return { ok: false, inconclusive: true, why: `/api/pass answered ${o.status} to the sample, so the page could not be tested` };
     return { ok: false, why: `the live page refuses its own export passes, every export is failing (${value})` };
   };
-  const timeout = sleep(75000).then(() => ({ ok: false, why: 'the page check got no answer in 75 s' }));
+  const timeout = sleep(75000).then(() => ({ ok: false, inconclusive: true, why: 'the page check got no answer in 75 s' }));
   try { return finish(await Promise.race([work(), timeout])); }
-  catch (err) { return finish({ ok: false, why: `the page check broke: ${err.message}` }); }
+  catch (err) { return finish({ ok: false, inconclusive: true, why: `the page check broke: ${err.message}` }); }
 }
 
 export async function liveCheck(site = SITE, { pageOnly = false } = {}) {
   const server = pageOnly ? { ok: true, siteDown: false, why: '' } : await checkServer(site);
   if (server.siteDown) return server;
   const page = await checkPage(site);
-  return { ok: server.ok && page.ok, siteDown: false, why: [server.why, page.why].filter(Boolean).join('; ') };
+  const failed = (!server.ok && !server.inconclusive) || (!page.ok && !page.inconclusive);
+  const ok = server.ok && page.ok;
+  return { ok, siteDown: false, inconclusive: !ok && !failed, why: [server.why, page.why].filter(Boolean).join('; ') };
 }
 
 // A failure must hold on every try: one dropped connection is not an outage.
@@ -134,6 +149,6 @@ if (isMain) {
   const site = at > 0 ? process.argv[at + 1] : SITE;
   const r = await liveCheckRetried(site, { tries: 2, gapMs: 15000, pageOnly: process.argv.includes('--page-only') });
   if (r.ok) console.log('live-pass-check: PASSED: the site answers and the live page accepts a real export pass');
-  else console.error(`live-pass-check: FAILED: ${r.why}`);
+  else console.error(`live-pass-check: ${r.inconclusive ? 'COULD NOT TELL' : 'FAILED'}: ${r.why}`);
   process.exit(r.ok ? 0 : 1);
 }
