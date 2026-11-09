@@ -36,6 +36,8 @@ EMSCRIPTEN_KEEPALIVE int hd_open(const uint8_t *extra, int size) {
   c->thread_count = 1;
   // A damaged picture is still a picture: one bad frame must not leave a hole.
   c->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
+  // Crop exactly: our copy reads any address, so no rounding to alignment.
+  c->flags |= AV_CODEC_FLAG_UNALIGNED;
   if (extra && size > 0) {
     c->extradata = av_mallocz(size + AV_INPUT_BUFFER_PADDING_SIZE);
     if (!c->extradata) return -1002;
