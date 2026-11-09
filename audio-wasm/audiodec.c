@@ -83,18 +83,20 @@ static float one(const uint8_t *p, int i, enum AVSampleFormat f) {
   }
 }
 
-// The block as mono 32-bit float, every channel averaged. dst holds
-// ad_samples() floats. 0, or negative for a format it cannot read.
-EMSCRIPTEN_KEEPALIVE int ad_mono(float *dst) {
+// One channel of the block as 32-bit float (k from 0), or all of them
+// averaged (k negative). dst holds ad_samples() floats. 0, or negative for a
+// format it cannot read.
+EMSCRIPTEN_KEEPALIVE int ad_plane(float *dst, int k) {
   int n = fr->nb_samples, ch = fr->ch_layout.nb_channels;
-  if (n <= 0 || ch <= 0) return -1003;
+  if (n <= 0 || ch <= 0 || k >= ch) return -1003;
   enum AVSampleFormat f = fr->format;
   int planar = av_sample_fmt_is_planar(f);
   enum AVSampleFormat base = av_get_packed_sample_fmt(f);
   if (base == AV_SAMPLE_FMT_NONE) return -1004;
   for (int i = 0; i < n; i++) {
+    if (k >= 0) { dst[i] = planar ? one(fr->extended_data[k], i, base) : one(fr->extended_data[0], i * ch + k, base); continue; }
     float v = 0;
-    for (int k = 0; k < ch; k++) v += planar ? one(fr->extended_data[k], i, base) : one(fr->extended_data[0], i * ch + k, base);
+    for (int c = 0; c < ch; c++) v += planar ? one(fr->extended_data[c], i, base) : one(fr->extended_data[0], i * ch + c, base);
     dst[i] = v / ch;
   }
   return 0;
