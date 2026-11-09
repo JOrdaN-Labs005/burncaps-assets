@@ -1,0 +1,26 @@
+name: Build the software audio reader
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Emscripten
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$HOME/emsdk"
+          "$HOME/emsdk/emsdk" install 4.0.10
+          "$HOME/emsdk/emsdk" activate 4.0.10
+      - name: Build
+        run: |
+          source "$HOME/emsdk/emsdk_env.sh"
+          emcc --version | head -1
+          bash audio-wasm/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio-dec
+          path: audio-wasm/out/*
+          if-no-files-found: error
