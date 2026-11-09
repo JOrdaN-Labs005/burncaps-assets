@@ -23,7 +23,7 @@ emmake make -j"$(nproc)" libavcodec/libavcodec.a libavutil/libavutil.a
 emcc "$here/audiodec.c" -I. libavcodec/libavcodec.a libavutil/libavutil.a \
   -o "$out/audio-dec.js" -O3 \
   -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createAudioDec -sENVIRONMENT=worker,node \
-  -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=16777216 -sMAXIMUM_MEMORY=268435456 -sSTACK_SIZE=1048576 \
+  -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=33554432 -sMAXIMUM_MEMORY=268435456 -sSTACK_SIZE=1048576 \
   -sFILESYSTEM=0 -sDYNAMIC_EXECUTION=0 -sASSERTIONS=0 \
   -sEXPORTED_FUNCTIONS=_malloc,_free -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPF32,stringToUTF8,lengthBytesUTF8
 ls -la "$out"
