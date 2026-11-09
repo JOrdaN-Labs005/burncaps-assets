@@ -101,3 +101,65 @@ EMSCRIPTEN_KEEPALIVE int ad_plane(float *dst, int k) {
   }
   return 0;
 }
+
+// ---------- the AAC encoder ----------
+// For a browser with no AudioEncoder of its own (Safari before 26), where a
+// clip would otherwise be written with no sound at all.
+static AVCodecContext *e = NULL;
+static AVPacket *ep = NULL;
+static AVFrame *ef = NULL;
+
+EMSCRIPTEN_KEEPALIVE void ae_close(void) {
+  if (e) avcodec_free_context(&e);
+  if (ep) av_packet_free(&ep);
+  if (ef) av_frame_free(&ef);
+}
+
+EMSCRIPTEN_KEEPALIVE int ae_open(int rate, int channels, int bitrate) {
+  ae_close();
+  const AVCodec *enc = avcodec_find_encoder_by_name("aac");
+  if (!enc) return -1100;
+  e = avcodec_alloc_context3(enc);
+  ep = av_packet_alloc();
+  ef = av_frame_alloc();
+  if (!e || !ep || !ef) return -1101;
+  e->thread_count = 1;
+  e->sample_rate = rate;
+  e->bit_rate = bitrate;
+  e->sample_fmt = AV_SAMPLE_FMT_FLTP;
+  e->time_base = (AVRational){ 1, rate };
+  e->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+  av_channel_layout_default(&e->ch_layout, channels);
+  return avcodec_open2(e, enc, NULL);
+}
+EMSCRIPTEN_KEEPALIVE int ae_frame_size(void) { return e->frame_size; }
+EMSCRIPTEN_KEEPALIVE int ae_extra_size(void) { return e->extradata_size; }
+EMSCRIPTEN_KEEPALIVE void ae_extra(uint8_t *dst) { memcpy(dst, e->extradata, e->extradata_size); }
+
+// nb samples per channel, the channels one after the other in src. src NULL:
+// the end, all that is waiting comes out. 0, or negative.
+EMSCRIPTEN_KEEPALIVE int ae_send(const float *src, int nb, double pts) {
+  if (!src) return avcodec_send_frame(e, NULL);
+  av_frame_unref(ef);
+  ef->nb_samples = nb;
+  ef->format = e->sample_fmt;
+  ef->sample_rate = e->sample_rate;
+  int r = av_channel_layout_copy(&ef->ch_layout, &e->ch_layout);
+  if (r < 0) return r;
+  r = av_frame_get_buffer(ef, 0);
+  if (r < 0) return r;
+  for (int c = 0; c < e->ch_layout.nb_channels; c++) memcpy(ef->extended_data[c], src + c * nb, nb * sizeof(float));
+  ef->pts = (int64_t)pts;
+  return avcodec_send_frame(e, ef);
+}
+// 1 a packet is ready, 0 none for now, negative an error.
+EMSCRIPTEN_KEEPALIVE int ae_receive(void) {
+  av_packet_unref(ep);
+  int r = avcodec_receive_packet(e, ep);
+  if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) return 0;
+  return r < 0 ? r : 1;
+}
+EMSCRIPTEN_KEEPALIVE int ae_size(void) { return ep->size; }
+EMSCRIPTEN_KEEPALIVE double ae_pts(void) { return (double)ep->pts; }
+EMSCRIPTEN_KEEPALIVE double ae_dur(void) { return (double)ep->duration; }
+EMSCRIPTEN_KEEPALIVE void ae_copy(uint8_t *dst) { memcpy(dst, ep->data, ep->size); }
