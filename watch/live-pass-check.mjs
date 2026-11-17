@@ -62,7 +62,7 @@ export async function checkServer(site = SITE) {
 export async function checkPage(site = SITE) {
   const chromePath = process.env.CHROME_PATH || (existsSync(MAC_CHROME) ? MAC_CHROME : 'google-chrome');
   const profile = mkdtempSync(path.join(os.tmpdir(), 'bc-live-pass-'));
-  const flags = ['--headless=new', `--user-data-dir=${profile}`, '--no-first-run', '--remote-debugging-port=0', 'about:blank'];
+  const flags = ['--headless=new', '--mute-audio', `--user-data-dir=${profile}`, '--no-first-run', '--remote-debugging-port=0', 'about:blank'];
   if (process.platform === 'linux') flags.unshift('--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu');
   const chrome = spawn(chromePath, flags, { stdio: 'ignore' });
   let ws;
